@@ -1,0 +1,179 @@
+#!/bin/bash
+
+usage() {
+cat << EOF
+
+Linux debugging environment on QEMU
+
+ Usage: $(basename $0) COMMAND
+
+	config	print configuration
+	build	build linux kernel
+	rootfs	build rootfs using busybox
+	run	run linux debugging environment
+
+EOF
+}
+
+defconfig_kernel() {
+	DEFCONFIG=defconfig
+	if [ "${ARCH}" == "arm" ]; then
+		DEFCONFIG=vexpress_defconfig
+	fi
+
+	make ${DEFCONFIG}
+}
+
+config_kernel() {
+	defconfig_kernel
+
+	echo -n "enable configs ... "
+	# optional config
+	# - scripts/config -e FRAME_POINTER
+
+	# essential config for kgdb
+	scripts/config -e DEBUG_INFO
+	scripts/config -e KGDB
+	echo "ok"
+}
+
+compile_kernel() {
+	make -j16
+}
+
+build_kernel() {
+	pushd ${KERNEL_DIR}
+	config_kernel
+	compile_kernel
+	popd
+}
+
+config_busybox() {
+	make defconfig
+
+	# enable CONFIG_STATIC for static linking
+	../${KERNEL_DIR}/scripts/config -e STATIC
+}
+
+compile_busybox() {
+	make -j16
+	make install
+}
+
+build_busybox() {
+	pushd ${BUSYBOX_DIR}
+	config_busybox
+	compile_busybox
+	popd
+}
+
+make_rootfs_image() {
+	# build busybox
+	build_busybox
+
+	# append files
+	sudo cp -fr ${ROOTFS_DIR}/* ${BUSYBOX_DIR}/_install
+	#sudo cp -fr ${ROOTFS_DIR}/* ${BUSYBOX_DIR}/_install
+	#sudo chown -R root:root ${BUSYBOX_DIR}/_install/*
+
+	# make images
+	pushd ${BUSYBOX_DIR}/_install
+	find . | cpio -H newc -o | gzip > ../rootfs.img.gz
+	popd
+}
+
+make_sdcard_image() {
+	qemu-img create -f raw ${BUSYBOX_DIR}/sdcard.img 8G
+}
+
+make_rootfs() {
+	make_rootfs_image
+	make_sdcard_image
+}
+
+run_kernel() {
+	tmux has-session -t ${SESSIONNAME} 2> /dev/null
+
+	if [ $? -ne 0 ]; then
+		tmux new-session -s ${SESSIONNAME} -n ${SESSIONNAME} -d
+		tmux split-window -h -t ${SESSIONNAME}
+
+		echo -n "QEMU Running ... "
+		tmux send-keys -t ${SESSIONNAME}:1.1 "${QEMU_CMD}" C-m
+		echo "OK"
+
+		echo -n "GDB Running ... "
+		tmux send-keys -t ${SESSIONNAME}:1.2 "${GDB_CMD}" C-m
+		echo "OK"
+
+		echo -n "GDB attaching ... "
+		sleep 2
+		tmux send-keys -t ${SESSIONNAME}:1.2 "target remote localhost:1234" C-m
+		echo "OK"
+
+		echo -n "GDB make a break point ... "
+		sleep 2
+		tmux send-keys -t ${SESSIONNAME}:1.2 "b start_kernel" C-m
+		echo "OK"
+
+		echo -n "Kernel Continuing ... "
+		sleep 2
+		tmux send-keys -t ${SESSIONNAME}:1.2 "c" C-m
+		echo "OK"
+	fi
+
+	tmux attach-session -t ${SESSIONNAME}
+}
+
+show_config() {
+cat << EOF
+
+========================== Configuration ==========================
+ARCH:          '${ARCH}'
+CROSS_COMPILE: '${CROSS_COMPILE}'
+KERNEL_DIR:    '${KERNEL_DIR}'
+BUSYBOX_DIR:   '${BUSYBOX_DIR}'
+ROOTFS_DIR:    '${ROOTFS_DIR}'
+-------------------------------------------------------------------
+SessionName:   '${SESSIONNAME}'
+KernelDTB:     '${KERNEL_DTB}'
+KernelImage:   '${KERNEL_IMG}'
+RootFSImage:   '${ROOTFS_IMG}'
+SDCardImage:   '${SDCARD_IMG}'
+===================================================================
+
+EOF
+}
+
+set_config(){
+	SESSIONNAME="kernel-dev"
+	KERNEL_DIR="linux"
+	BUSYBOX_DIR="busybox"
+	ROOTFS_DIR="rootfs"
+	if [ "${ARCH}" == "arm" ]; then
+		KERNEL_DTB="${KERNEL_DIR}/arch/arm/boot/dts/vexpress-v2p-ca9.dtb"
+		KERNEL_IMG="${KERNEL_DIR}/arch/arm/boot/zImage"
+		ROOTFS_IMG="${BUSYBOX_DIR}/rootfs.img.gz"
+		SDCARD_IMG="${BUSYBOX_DIR}/sdcard.img"
+
+		QEMU_CMD="/usr/bin/qemu-system-arm -s -S -M vexpress-a9 -m 512M -sd ${SDCARD_IMG} -dtb ${KERNEL_DTB} -kernel ${KERNEL_IMG} -initrd ${ROOTFS_IMG} -append \"root=/dev/ram rdinit=/init.sh console=ttyAMA0\" -nographic"
+		GDB_CMD="/usr/bin/cgdb -d /usr/bin/gdb-multiarch -q ${KERNEL_DIR}/vmlinux"
+
+		if ! [ -d ${KERNEL_DIR} ]; then
+			echo "Error: '${KERNEL_DIR}' directory doesn't exist"
+			exit 1
+		fi
+	fi
+}
+
+COMM=$1
+ARGS=$@
+
+set_config
+case ${COMM} in
+	config) show_config ${ARGS} ;;
+	build)  build_kernel ${ARGS} ;;
+	rootfs) make_rootfs ${ARGS} ;;
+	run)    run_kernel ${ARGS} ;;
+	*)  usage ;;
+esac
