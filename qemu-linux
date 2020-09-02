@@ -72,7 +72,7 @@ make_rootfs_image() {
 	build_busybox
 
 	# append files
-	sudo cp -fr ${ROOTFS_DIR}/* ${BUSYBOX_DIR}/_install
+	cp -fr ${ROOTFS_DIR}/* ${BUSYBOX_DIR}/_install
 	#sudo cp -fr ${ROOTFS_DIR}/* ${BUSYBOX_DIR}/_install
 	#sudo chown -R root:root ${BUSYBOX_DIR}/_install/*
 
